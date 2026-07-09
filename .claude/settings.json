@@ -1,0 +1,18 @@
+{
+  "model": "fable",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "Start-Process 'C:\\Users\\somin\\OneDrive\\Desktop\\자동화\\purchase\\start_purchase_app.bat'",
+            "shell": "powershell",
+            "async": true,
+            "statusMessage": "구매 웹앱 시작 중..."
+          }
+        ]
+      }
+    ]
+  }
+}

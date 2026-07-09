@@ -1,0 +1,27 @@
+# 민감 정보
+.env
+
+# 디버그/임시 파일
+rpa_debug.txt
+click_coords.txt
+*.log
+last_register_result.json
+registered_orders.json
+
+# 스크린샷/디버그 이미지
+debug_*.png
+screenshot_*.png
+rpa_debug_*.png
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# 엑셀/데이터
+입고처 및 납품장소.xlsx
+order_history_raw.json
+board_structure.json
+
+# PDF
+*.pdf
