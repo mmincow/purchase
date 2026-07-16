@@ -47,64 +47,70 @@ def dismiss_popups(page):
         page.wait_for_timeout(500)
 
 
+def _find_in_all_frames(page, text: str):
+    """모든 frame에서 텍스트 요소 찾기 (ONECHAMBER 제외). (x, element) 리스트 반환."""
+    candidates = []
+    for frame in page.frames:
+        if 'onechamber' in (frame.url or '').lower():
+            continue
+        try:
+            for el in frame.locator(f'text={text}').all():
+                try:
+                    box = el.bounding_box()
+                    if box and box['x'] < 300 and box['width'] > 0:
+                        candidates.append((box['x'], el))
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    return sorted(candidates, key=lambda t: t[0])
+
+
 def navigate_to_order_register(page):
-    # 출퇴근 팝업 등 닫기
     dismiss_popups(page)
 
+    # 1. 구매/자재관리 클릭
     for attempt in range(6):
         menu = page.locator('text=구매/자재관리')
         if menu.count() > 0 and menu.first.is_visible():
             menu.first.click()
+            _dbg(f"  [navigate] 구매/자재관리 클릭 (시도 {attempt+1})")
             break
         dismiss_popups(page)
         page.wait_for_timeout(5000)
+
     page.wait_for_timeout(3000)
     page.mouse.click(800, 400)
-    page.wait_for_timeout(1000)
-    # 발주관리 클릭 없이 발주등록 직접 클릭 (발주관리 클릭 시 발주집계로 이동됨)
     page.wait_for_timeout(2000)
 
-    # 사이드바에서 발주등록 직접 클릭 (x < 220 = 사이드바 영역)
-    clicked = False
-    for h in page.locator('text=발주등록').all():
-        try:
-            box = h.bounding_box()
-            if box and box['x'] < 220 and h.is_visible():
-                h.click(force=True)
-                clicked = True
-                break
-        except Exception:
-            pass
+    # 2. 발주등록이 이미 보이면 바로 클릭
+    hits = _find_in_all_frames(page, '발주등록')
+    _dbg(f"  [navigate] 발주등록 후보 {len(hits)}개: {[(round(x),) for x,_ in hits]}")
+    if hits:
+        x_val, el = hits[0]
+        _dbg(f"  [navigate] 발주등록 클릭 x={x_val:.0f}")
+        el.click(force=True)
+        page.wait_for_timeout(8000)
+        return
 
-    if not clicked:
-        # 발주관리 섹션이 접혀 있는 경우 — toggle만 클릭해서 펼치기 (링크 클릭 아님)
-        expanded = page.evaluate("""() => {
-            for (const el of document.querySelectorAll('*')) {
-                const txt = (el.textContent || '').trim();
-                if (txt !== '발주관리') continue;
-                const r = el.getBoundingClientRect();
-                if (r.x > 220 || r.width === 0) continue;
-                const parent = el.parentElement || el;
-                // 토글 아이콘/버튼 찾기 (링크 아닌 것)
-                for (const sel of ['[class*="toggle"]','[class*="arrow"]','[class*="expand"]','[class*="icon"]']) {
-                    const btn = parent.querySelector(sel);
-                    if (btn) { btn.click(); return true; }
-                }
-                // 부모가 <a> 태그가 아니면 클릭해서 펼치기
-                if (parent.tagName !== 'A') { parent.click(); return true; }
-                return false;
-            }
-            return false;
-        }""")
-        page.wait_for_timeout(1500)
-        for h in page.locator('text=발주등록').all():
-            try:
-                box = h.bounding_box()
-                if box and box['x'] < 220 and h.is_visible():
-                    h.click(force=True)
-                    break
-            except Exception:
-                pass
+    # 3. 발주관리 클릭 → 사이드바 펼치기
+    hits2 = _find_in_all_frames(page, '발주관리')
+    _dbg(f"  [navigate] 발주관리 후보 {len(hits2)}개: {[(round(x),) for x,_ in hits2]}")
+    if hits2:
+        x_val, el = hits2[0]
+        _dbg(f"  [navigate] 발주관리 클릭 x={x_val:.0f}")
+        el.click(force=True)
+    page.wait_for_timeout(6000)  # 사이드바 펼쳐지고 발주등록 나타날 때까지 충분히 대기
+
+    # 4. 다시 발주등록 찾아 클릭
+    hits3 = _find_in_all_frames(page, '발주등록')
+    _dbg(f"  [navigate] 발주등록 후보(2차) {len(hits3)}개: {[(round(x),) for x,_ in hits3]}")
+    if hits3:
+        x_val, el = hits3[0]
+        _dbg(f"  [navigate] 발주등록 클릭 x={x_val:.0f}")
+        el.click(force=True)
+    else:
+        _dbg("  [navigate] 발주등록 클릭 실패!")
 
     page.wait_for_timeout(8000)
 
@@ -119,51 +125,22 @@ def fill_납품장소(page, text: str):
     """체크박스 → 기능모음 → 부가정보 → 납품장소 자동 입력 (text 없으면 체크박스까지만)"""
     _dbg(f"[fill_납품장소 시작] text={text[:40]!r}")
     try:
-        # 1. scrollIntoView — 별도 evaluate 후 스크롤 완료 대기
-        page.evaluate("""() => {
-            const g = window._headerGrid;
-            if (g && g.scrollIntoView && window._newOrderItemIdx !== undefined)
-                g.scrollIntoView(window._newOrderItemIdx);
-        }""")
-        page.wait_for_timeout(700)
-
-        # 2. 체크박스 좌표 계산
-        # 사용자 직접 클릭으로 확인된 값: 체크박스 x = cr.x - 165
-        # (cr.x가 사이드바 상태에 따라 변해도 오프셋 165는 고정)
-        chk_pos = page.evaluate("""() => {
+        # 1. checkItem() API로 체크박스 선택 (마우스 클릭 안 함 — 사이드바 오클릭 방지)
+        chk_result = page.evaluate("""() => {
             try {
                 const g = window._headerGrid;
-                if (!g) return null;
+                if (!g) return 'no_grid';
                 const idx = window._newOrderItemIdx;
-                if (idx === undefined || idx === null) return null;
-                const container = g.getContainer ? g.getContainer() : null;
-                if (!container) return null;
-                const cr = container.getBoundingClientRect();
-                const ROW_H = 34;
-                const HEADER_H = 34;
-                const CHK_X = cr.x - 165;
-
-                for (const fn of ['getTopItem', 'getTopIndex']) {
-                    if (typeof g[fn] !== 'function') continue;
-                    try {
-                        const topIdx = g[fn]();
-                        const visualRow = idx - topIdx;
-                        if (visualRow >= 0 && visualRow < 20) {
-                            return {x: CHK_X, y: cr.y + HEADER_H + visualRow * ROW_H + ROW_H/2, crX: cr.x, method: fn};
-                        }
-                    } catch(e) {}
-                }
-                return null;
-            } catch(e) { return null; }
+                if (idx === undefined || idx === null) return 'no_idx';
+                if (typeof g.checkItem !== 'function') return 'no_checkItem';
+                g.checkItem(idx, true);
+                return 'checked:' + idx;
+            } catch(e) { return 'err:' + String(e); }
         }""")
-        _dbg(f"  [체크박스 좌표] {chk_pos}")
-        if not chk_pos:
-            _dbg("  [체크박스] 위치 못 찾음 — 종료")
+        _dbg(f"  [체크박스 checkItem] {chk_result}")
+        if not chk_result.startswith('checked'):
+            _dbg(f"  [체크박스] checkItem 실패 — 종료")
             return
-        page.keyboard.press("Escape")
-        page.wait_for_timeout(300)
-        page.mouse.click(chk_pos['x'], chk_pos['y'])
-        _dbg(f"  [체크박스 클릭] x={chk_pos['x']:.1f}, y={chk_pos['y']:.1f}")
         page.wait_for_timeout(800)
 
         # 납품장소 값 없으면 체크박스만 클릭하고 종료
@@ -171,69 +148,159 @@ def fill_납품장소(page, text: str):
             _dbg("  [납품장소 없음] 체크박스만 클릭하고 종료")
             return
 
-        # 2. 기능모음 버튼 좌표 찾아서 마우스 클릭
-        btn_box = page.evaluate("""() => {
-            const els = [...document.querySelectorAll('*')].filter(el => {
-                const txt = (el.innerText || '').trim();
-                const r = el.getBoundingClientRect();
-                return txt.includes('기능모음') && r.width > 0 && r.height > 0 && el.childElementCount <= 5;
-            });
-            if (!els.length) return null;
-            els.sort((a, b) => a.childElementCount - b.childElementCount);
-            const r = els[0].getBoundingClientRect();
-            return {x: r.x + r.width / 2, y: r.y + r.height / 2};
-        }""")
-        if not btn_box:
-            _dbg("  [기능모음] 버튼 못 찾음")
+        # 페이지 상태 확인용 스크린샷
+        page.screenshot(path="C:/Users/somin/OneDrive/Desktop/자동화/purchase/debug_after_checkbox.png")
+
+        # 2. 기능모음 버튼 — 모든 frame 탐색 (ONECHAMBER 제외)
+        btn_el = None
+        for frame in page.frames:
+            if 'onechamber' in (frame.url or '').lower():
+                continue
+            try:
+                for el in frame.locator('text=기능모음').all():
+                    try:
+                        box = el.bounding_box()
+                        if box and box['width'] > 0 and box['height'] > 0:
+                            btn_el = el
+                            _dbg(f"  [기능모음] frame={frame.url[:40]!r} box={box}")
+                            break
+                    except Exception:
+                        pass
+                if btn_el:
+                    break
+            except Exception:
+                pass
+        if not btn_el:
+            _dbg("  [기능모음] 버튼 못 찾음 — 전체 frame 탐색 후에도 없음")
             return
-        page.mouse.click(btn_box['x'], btn_box['y'])
-        _dbg(f"  [기능모음] 클릭 at {btn_box}")
+        btn_el.click(force=True)
+        _dbg("  [기능모음] 클릭 완료")
         page.wait_for_timeout(800)
 
-        # 3. 부가정보 메뉴 좌표 찾아서 클릭
-        sub_box = page.evaluate("""() => {
-            const els = [...document.querySelectorAll('*')].filter(el => {
-                const txt = (el.innerText || '').trim();
-                const r = el.getBoundingClientRect();
-                return txt === '부가정보' && r.width > 0 && r.height > 0;
-            });
-            if (!els.length) return null;
-            const r = els[0].getBoundingClientRect();
-            return {x: r.x + r.width / 2, y: r.y + r.height / 2};
-        }""")
-        if not sub_box:
+        # 3. 부가정보 메뉴 — 모든 frame 탐색
+        sub_el = None
+        for frame in page.frames:
+            if 'onechamber' in (frame.url or '').lower():
+                continue
+            try:
+                for el in frame.locator('text=부가정보').all():
+                    try:
+                        box = el.bounding_box()
+                        if box and box['width'] > 0 and box['height'] > 0:
+                            sub_el = el
+                            _dbg(f"  [부가정보] box={box}")
+                            break
+                    except Exception:
+                        pass
+                if sub_el:
+                    break
+            except Exception:
+                pass
+        if not sub_el:
             _dbg("  [부가정보] 메뉴 못 찾음")
             return
-        page.mouse.click(sub_box['x'], sub_box['y'])
-        _dbg(f"  [부가정보] 클릭 at {sub_box}")
-        page.wait_for_timeout(1000)
+        sub_el.click(force=True)
+        _dbg("  [부가정보] 클릭 완료")
+        page.wait_for_timeout(1500)
+        page.screenshot(path="C:/Users/somin/OneDrive/Desktop/자동화/purchase/debug_bugage_dialog.png")
 
-        # 4. 납품장소 입력창 탐색
-        for sel in [
-            'input[id*="dlvPlc"]', 'textarea[id*="dlvPlc"]',
-            'input[name*="dlvPlc"]', 'textarea[name*="dlvPlc"]',
-            'label:has-text("납품장소") + input',
-            'label:has-text("납품장소") + textarea',
-        ]:
-            loc = page.locator(sel)
-            if loc.count() > 0:
-                loc.first.click()
-                loc.first.fill(text)
-                _dbg(f"  [납품장소 입력] {text[:40]}")
-                break
-        else:
+        # 4. 납품장소 입력창 탐색 — readonly 제외
+        dlv_el = None
+        for frame in page.frames:
+            if 'onechamber' in (frame.url or '').lower():
+                continue
+            try:
+                for el in frame.locator('text=납품장소').all():
+                    try:
+                        label_box = el.bounding_box()
+                        if not label_box or label_box['width'] == 0:
+                            continue
+                        _dbg(f"  [납품장소 label] y={label_box['y']:.0f} frame={frame.url[:40]!r}")
+                        for inp in frame.locator('input:not([readonly])').all():
+                            try:
+                                ib = inp.bounding_box()
+                                if ib and ib['width'] > 50 and ib['x'] > label_box['x'] and \
+                                   abs(ib['y'] - label_box['y']) < 15:
+                                    dlv_el = inp
+                                    _dbg(f"  [납품장소 editable input] box={ib}")
+                                    break
+                            except Exception:
+                                pass
+                        if dlv_el:
+                            break
+                    except Exception:
+                        pass
+                if dlv_el:
+                    break
+            except Exception:
+                pass
+
+        if not dlv_el:
             _dbg("  [납품장소] 입력창 못 찾음")
-            page.screenshot(path="debug_bugage.png")
             page.keyboard.press("Escape")
             return
 
-        # 5. 확인/저장
-        ok = page.locator('button:has-text("확인"), button:has-text("저장")')
-        if ok.count() > 0:
-            ok.first.click()
-        else:
+        # 5. 클립보드에 주소 복사 → JS 이벤트 감시 주입 → 소민씨가 클릭+Ctrl+V → 대기
+        import subprocess
+        proc = subprocess.Popen(['clip'], stdin=subprocess.PIPE, shell=True)
+        proc.communicate(input=text.encode('utf-16le'))
+        _dbg(f"  [클립보드 준비완료] {text[:50]!r}")
+
+        # 하드웨어 키 이벤트(pyautogui)로 Tab 두 번 → Ctrl+V
+        # OBT는 소프트웨어(Playwright) 키/마우스 이벤트를 무시하므로
+        # OS 수준 SendInput 키만 동작함. 키보드는 좌표가 필요 없어 DPI 무관.
+        page.wait_for_timeout(300)
+        import time as _t
+        import pyautogui
+        try:
+            wins = [w for w in pyautogui.getAllWindows()
+                    if 'chromium' in w.title.lower() or 'amaranth' in w.title.lower()
+                    or '아마란스' in w.title]
+            if wins:
+                try:
+                    wins[0].activate()
+                except Exception:
+                    wins[0].minimize()
+                    wins[0].restore()
+                _dbg(f"  [브라우저 창 활성화] {wins[0].title[:40]!r}")
+            else:
+                _dbg("  [브라우저 창 못 찾음 — 그냥 진행]")
+        except Exception as e:
+            _dbg(f"  [창 활성화 실패] {e}")
+        _t.sleep(0.5)
+
+        pyautogui.press('tab')       # 지불조건
+        _t.sleep(0.25)
+        pyautogui.press('tab')       # 납품장소
+        _t.sleep(0.3)
+        page.screenshot(path="C:/Users/somin/OneDrive/Desktop/자동화/purchase/debug_after_tab.png")
+        _dbg("  [하드웨어 Tab 두 번 완료]")
+
+        pyautogui.hotkey('ctrl', 'v')
+        _t.sleep(0.5)
+        page.screenshot(path="C:/Users/somin/OneDrive/Desktop/자동화/purchase/debug_after_paste.png")
+        _dbg(f"  [납품장소 Ctrl+V 완료] {text[:50]!r}")
+
+        # 확인 버튼
+        confirmed = False
+        for frame in page.frames:
+            if 'onechamber' in (frame.url or '').lower():
+                continue
+            try:
+                for el in frame.locator('button:has-text("확인")').all():
+                    box = el.bounding_box()
+                    if box and box['width'] > 0:
+                        el.click(force=True)
+                        _dbg(f"  [확인 버튼 클릭] box={box}")
+                        confirmed = True
+                        break
+            except Exception:
+                pass
+            if confirmed:
+                break
+        if not confirmed:
             page.keyboard.press("Enter")
-        page.wait_for_timeout(500)
+        page.wait_for_timeout(800)
     except Exception as e:
         _dbg(f"  [납품장소 오류] {e}")
 
@@ -478,25 +545,46 @@ def register_order(page, order):
             page.wait_for_timeout(2000)
             print(f"  [캔버스 하단 클릭] {click_pos}")
 
-    # 발주번호 캡처 (setCurrent 후 서버가 생성)
+    # 발주번호 캡처 — 서버가 비동기로 생성하므로 충분히 대기 후 재시도
+    page.wait_for_timeout(3000)  # 초기 서버 응답 대기
     po_no = ""
-    for _ in range(5):
+    for attempt in range(10):
         po_no = page.evaluate("""() => {
             try {
                 const g = window._headerGrid;
                 if (!g) return '';
                 const dp = g.getDataSource();
                 const rc = dp.rowCount ? dp.rowCount() : 0;
+                // A: dp.getValue (itemIndex 직접)
                 for (let i = rc - 1; i >= 0; i--) {
-                    const pn = dp.getValue(i, 'poNo');
+                    let pn = null;
+                    try { pn = dp.getValue(i, 'poNo'); } catch(e) {}
+                    if (!pn && typeof g.getDataRow === 'function') {
+                        try { const dr = g.getDataRow(i); pn = dp.getValue(dr, 'poNo'); } catch(e) {}
+                    }
                     if (pn) return String(pn);
+                }
+                // B: 그리드 텍스트에서 직접 읽기 (PO로 시작하는 값)
+                const ic = g.getItemCount ? g.getItemCount() : 0;
+                for (let i = 0; i < ic; i++) {
+                    for (const fn of ['getValues', 'getRowValues']) {
+                        if (typeof g[fn] !== 'function') continue;
+                        try {
+                            const vals = g[fn](i);
+                            if (!vals) continue;
+                            for (const v of Object.values(vals)) {
+                                if (v && /^PO\d/.test(String(v))) return String(v);
+                            }
+                        } catch(e) {}
+                    }
                 }
                 return '';
             } catch(e) { return ''; }
         }""")
+        _dbg(f"  [발주번호 캡처 시도 {attempt+1}] {po_no!r}")
         if po_no:
             break
-        page.wait_for_timeout(1000)
+        page.wait_for_timeout(1500)
 
     print(f"  [발주번호] {po_no}")
 

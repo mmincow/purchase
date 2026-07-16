@@ -303,6 +303,9 @@ async def api_register(request: dict):
     for o in orders:
         vendor_name = o.get("거래처", "")
         vendor_code = tr_code_map.get((o["품번"], vendor_name), tr_code_map.get(vendor_name, ""))
+        ingochu = str(o.get("입고처", "")).strip()
+        dlvplc = _납품장소_map.get(ingochu, "")
+        print(f"  [납품장소 매핑] {o['품번']}: 입고처={ingochu!r} → 납품장소={dlvplc[:30]!r}")
         rpa_orders.append({
             "품번": o["품번"],
             "요청수량": int(o.get("요청수량", 0)),
@@ -310,7 +313,7 @@ async def api_register(request: dict):
             "거래처코드": vendor_code,
             "거래처명": vendor_name,
             "비고": o.get("비고", ""),
-            "납품장소": _납품장소_map.get(str(o.get("입고처", "")).strip(), ""),
+            "납품장소": dlvplc,
         })
 
     # 등록 완료 목록에 저장
@@ -600,7 +603,7 @@ async def index():
             for order in pending_orders:
                 site_class = "pill-inhouse" if order['생산기지'] == '자사' else "pill-outsource"
                 html += f"""
-                    <tr id="row-{order['id']}" data-item-cd="{order['품번']}" data-qty="{order['요청수량']}" data-due="{order['입고요청일']}" data-itemnm="{order['품명']}">
+                    <tr id="row-{order['id']}" data-item-cd="{order['품번']}" data-qty="{order['요청수량']}" data-due="{order['입고요청일']}" data-itemnm="{order['품명']}" data-ingochu="{order['입고처']}">
                         <td class="item-code-cell">{order['품번']}</td>
                         <td>{order['품명']}</td>
                         <td style="font-weight:600;">{order['요청수량']}</td>
@@ -822,6 +825,7 @@ async def index():
                 입고요청일: row.dataset.due,
                 거래처: row.dataset.vendor,   // 확인 시 저장된 거래처 사용
                 비고: document.getElementById('note-' + id).value,
+                입고처: row.dataset.ingochu || '',
             }});
         }});
 
