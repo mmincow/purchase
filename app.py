@@ -6,7 +6,7 @@ import subprocess
 import threading
 import time
 import winsound
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import openpyxl
@@ -85,6 +85,24 @@ REGISTERED_FILE = BASE_DIR / "registered_orders.json"
 DISMISSED_FILE = BASE_DIR / "dismissed_orders.json"
 AUDIT_FILE = BASE_DIR / "audit_log.json"
 
+# 회사 로고 (base64 임베드)
+_logo_b64 = ""
+try:
+    with open(BASE_DIR / "매홍 로고.png", "rb") as _lf:
+        _logo_b64 = base64.b64encode(_lf.read()).decode()
+    print("회사 로고 로드 완료")
+except Exception as _e:
+    print(f"로고 로딩 오류: {_e}")
+
+# M 마크만 (사이드바용, 배경 투명)
+_mark_b64 = ""
+try:
+    with open(BASE_DIR / "매홍_마크.png", "rb") as _mf:
+        _mark_b64 = base64.b64encode(_mf.read()).decode()
+    print("로고 마크 로드 완료")
+except Exception as _e:
+    print(f"마크 로딩 오류: {_e}")
+
 # 납품장소 매핑 (입고처 코드 → 납품장소 전체 텍스트)
 _납품장소_map: dict = {}
 try:
@@ -147,12 +165,13 @@ def append_audit(action: str, operator: str, detail: str):
         json.dump(records, f, ensure_ascii=False, indent=2)
 
 
-def load_audit_log(limit: int = 30) -> list:
+def load_audit_log() -> list:
+    """전체 감사 로그, 최신순."""
     if not AUDIT_FILE.exists():
         return []
     with open(AUDIT_FILE, encoding="utf-8") as f:
         records = json.load(f)
-    return list(reversed(records[-limit:]))
+    return list(reversed(records))
 
 
 def load_vendor_map():
@@ -316,6 +335,25 @@ async def api_dismiss_order(request: dict):
     return JSONResponse({"ok": True})
 
 
+@app.post("/api/restore-order")
+async def api_restore_order(request: dict):
+    """삭제한 발주 요청 복구: 대기 목록으로 되돌림."""
+    order_id = str(request.get("id", ""))
+    operator = str(request.get("담당자", ""))
+    if not order_id:
+        return JSONResponse({"ok": False, "error": "id 없음"}, status_code=400)
+
+    records = []
+    if DISMISSED_FILE.exists():
+        with open(DISMISSED_FILE, encoding="utf-8") as f:
+            records = json.load(f)
+    updated = [r for r in records if str(r["id"]) != order_id]
+    with open(DISMISSED_FILE, "w", encoding="utf-8") as f:
+        json.dump(updated, f, ensure_ascii=False, indent=2)
+    append_audit("복구", operator, f"삭제한 발주 요청 복구 — 품번 {request.get('품번', '?')}")
+    return JSONResponse({"ok": True})
+
+
 @app.post("/api/mark-registered")
 async def api_mark_registered(request: dict):
     """수동으로 등록 완료 처리."""
@@ -435,7 +473,11 @@ async def index():
     # 등록완료 분리
     registered_data = load_registered_orders()
     registered_ids = {r["id"] for r in registered_data}
-    dismissed_ids = load_dismissed_ids()
+    dismissed_records = []
+    if DISMISSED_FILE.exists():
+        with open(DISMISSED_FILE, encoding="utf-8") as f:
+            dismissed_records = json.load(f)
+    dismissed_ids = {str(r["id"]) for r in dismissed_records}
     pending_orders = [
         o for o in orders
         if str(o["id"]) not in registered_ids and str(o["id"]) not in dismissed_ids
@@ -448,7 +490,7 @@ async def index():
 
     vendor_map, vendor_duplicates = load_vendor_map()
     item_vendors = build_item_vendors()
-    audit_entries = load_audit_log(30)
+    audit_entries = load_audit_log()
     today = date.today().strftime("%Y년 %m월 %d일")
 
     # 거래처 매핑 데이터를 JSON으로 준비
@@ -474,11 +516,10 @@ async def index():
             box-shadow: 1px 0 4px rgba(0,0,0,0.04);
         }}
         .sidebar .logo {{
-            width: 34px; height: 34px; background: linear-gradient(135deg, #e8663c, #f5a623);
-            border-radius: 8px; margin-bottom: 24px;
+            width: 38px; margin-bottom: 24px;
             display: flex; align-items: center; justify-content: center;
-            font-weight: 700; font-size: 14px; color: white;
         }}
+        .sidebar .logo img {{ width: 100%; height: auto; }}
         .sidebar .nav-item {{
             width: 36px; height: 36px; border-radius: 8px;
             display: flex; align-items: center; justify-content: center;
@@ -533,8 +574,9 @@ async def index():
         .toolbar .status-dot {{ width: 8px; height: 8px; border-radius: 50%; }}
         .dot-pending {{ background: #f5a623; }}
         .dot-confirmed {{ background: #56c596; }}
-        .board-content {{ padding: 0; }}
-        .group-header {{ padding: 12px 28px; display: flex; align-items: center; gap: 10px; }}
+        .board-content {{ padding: 20px 24px; display: flex; flex-direction: column; gap: 16px; }}
+        .group-card {{ background: #ffffff; border: 1px solid #e8eaf0; border-radius: 12px; box-shadow: 0 2px 10px rgba(59,63,92,0.06); overflow: hidden; }}
+        .group-header {{ padding: 14px 20px; display: flex; align-items: center; gap: 10px; }}
         .group-header .group-color {{ width: 6px; height: 30px; border-radius: 3px; }}
         .group-header .group-title {{ font-size: 15px; font-weight: 700; }}
         .group-header .group-count {{ font-size: 13px; color: #7a7f9a; background: #eef0f6; padding: 2px 10px; border-radius: 10px; }}
@@ -592,21 +634,23 @@ async def index():
 <body>
 
 <div class="sidebar">
-    <div class="logo">M</div>
+    <div class="logo"><img src="data:image/png;base64,{_mark_b64}" alt="M"></div>
     <div class="nav-item active" title="발주 자동화">
         <svg viewBox="0 0 24 24"><path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z"/></svg>
     </div>
     <div class="nav-item" title="설정">
         <svg viewBox="0 0 24 24"><path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58c.18-.14.23-.41.12-.61l-1.92-3.32c-.12-.22-.37-.29-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54c-.04-.24-.24-.41-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96c-.22-.08-.47 0-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58c-.18.14-.23.41-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6c-1.98 0-3.6-1.62-3.6-3.6s1.62-3.6 3.6-3.6 3.6 1.62 3.6 3.6-1.62 3.6-3.6 3.6z"/></svg>
     </div>
+    <div class="nav-item" title="작업 로그" onclick="openAuditModal()">
+        <svg viewBox="0 0 24 24"><path d="M13 3c-4.97 0-9 4.03-9 9H1l3.89 3.89.07.14L9 12H6c0-3.87 3.13-7 7-7s7 3.13 7 7-3.13 7-7 7c-1.93 0-3.68-.79-4.94-2.06l-1.42 1.42C8.27 19.99 10.51 21 13 21c4.97 0 9-4.03 9-9s-4.03-9-9-9zm-1 5v5l4.28 2.54.72-1.21-3.5-2.08V8H12z"/></svg>
+    </div>
 </div>
 
 <div class="main">
     <div class="top-header">
         <div class="board-title">
-            <div class="icon">
-                <svg viewBox="0 0 24 24"><path d="M19 3H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm-5 14H7v-2h7v2zm3-4H7v-2h10v2zm0-4H7V7h10v2z"/></svg>
-            </div>
+            <img src="data:image/png;base64,{_logo_b64}" alt="Maehong L&amp;F" style="height:42px;width:auto;flex-shrink:0;">
+            <div style="width:1px;height:26px;background:#e0e2ea;margin:0 8px;"></div>
             구매발주 자동화
         </div>
         <div class="user-info">
@@ -629,12 +673,16 @@ async def index():
             <span>확인 요청 <strong id="pending-count">{len(pending_orders)}</strong></span>
         </div>
         <div class="status-count">
+            <div class="status-dot dot-confirmed"></div>
+            <span>확인 완료 <strong id="confirmed-count">0</strong></span>
+        </div>
+        <div class="status-count">
             <div class="status-dot" style="background:#a78bfa;"></div>
             <span>등록 완료 <strong>{len(reg_display)}</strong></span>
         </div>
         <div class="status-count">
-            <div class="status-dot dot-confirmed"></div>
-            <span>확인 <strong id="confirmed-count">0</strong></span>
+            <div class="status-dot" style="background:#e85d4a;"></div>
+            <span>삭제 내역 <strong>{len(dismissed_records)}</strong></span>
         </div>
     </div>
 
@@ -643,17 +691,17 @@ async def index():
 
     if error:
         html += f'<div class="empty-state"><h2>오류 발생</h2><p>{error}</p></div>'
-    elif not pending_orders and not reg_display:
-        html += '<div class="empty-state"><h2>발주 대기 건이 없습니다</h2><p>먼데이닷컴에서 "요청 완료" 상태인 새 항목이 들어오면 여기에 표시됩니다.</p></div>'
     else:
-        # ── 확인 요청 그룹 ──────────────────────────────────────
-        if pending_orders:
-            html += f"""
-        <div class="group-header">
+        # ── 확인 요청 그룹 (항상 표시) ──────────────────────────
+        html += f"""
+        <div class="group-card">
+        <div class="group-header" style="cursor:pointer;background:#f5f8ff;" onclick="toggleSection('pending-section','pending-toggle-icon')">
             <div class="group-color" style="background: #6a9bff;"></div>
             <span class="group-title" style="color: #6a9bff;">확인 요청</span>
-            <span class="group-count">{len(pending_orders)}건</span>
+            <span class="group-count" id="pending-group-count">{len(pending_orders)}건</span>
+            <span id="pending-toggle-icon" style="margin-left:auto;color:#a0a4b8;font-size:13px;">▼</span>
         </div>
+        <div id="pending-section" style="display:block;">
         <div class="table-wrapper">
             <table>
                 <thead>
@@ -675,11 +723,11 @@ async def index():
                         <th></th>
                     </tr>
                 </thead>
-                <tbody>
+                <tbody id="pending-tbody">
 """
-            for order in pending_orders:
-                site_class = "pill-inhouse" if order['생산기지'] == '자사' else "pill-outsource"
-                html += f"""
+        for order in pending_orders:
+            site_class = "pill-inhouse" if order['생산기지'] == '자사' else "pill-outsource"
+            html += f"""
                     <tr id="row-{order['id']}" data-item-cd="{order['품번']}" data-qty="{order['요청수량']}" data-due="{order['입고요청일']}" data-itemnm="{order['품명']}" data-ingochu="{order['입고처']}">
                         <td class="item-code-cell">{order['품번']}</td>
                         <td>{order['품명']}</td>
@@ -707,26 +755,70 @@ async def index():
                         </td>
                     </tr>
 """
-
-            html += """
+        pending_empty_display = "" if pending_orders else "table-row"
+        html += f"""
+                    <tr id="pending-empty" style="display:{pending_empty_display or 'none'};">
+                        <td colspan="15" style="text-align:center;color:#a0a4b8;padding:24px;">확인 요청 건이 없습니다.</td>
+                    </tr>
                 </tbody>
             </table>
         </div>
+        </div>
+        </div>
 """
-        else:
-            html += '<div class="empty-state" style="padding:40px 20px;"><p style="color:#a0a4b8;">확인 요청 건이 없습니다.</p></div>'
 
-        # ── 등록 완료 그룹 ──────────────────────────────────────
-        if reg_display:
-            collapsed = "true" if pending_orders else "false"
-            html += f"""
-        <div class="group-header" style="cursor:pointer;margin-top:8px;" onclick="toggleRegDone()">
+        # ── 확인 완료 그룹 (항상 표시 — 확인 누르면 여기로 이동) ──
+        html += """
+        <div class="group-card">
+        <div class="group-header" style="cursor:pointer;background:#f0fbf5;" onclick="toggleSection('confirmed-section','confirmed-toggle-icon')">
+            <div class="group-color" style="background: #56c596;"></div>
+            <span class="group-title" style="color: #1e7a48;">확인 완료</span>
+            <span class="group-count" id="confirmed-group-count">0건</span>
+            <span id="confirmed-toggle-icon" style="margin-left:auto;color:#a0a4b8;font-size:13px;">▶</span>
+        </div>
+        <div id="confirmed-section" style="display:none;">
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>품번</th>
+                        <th>품명</th>
+                        <th>요청수량</th>
+                        <th>현재고</th>
+                        <th>소진월</th>
+                        <th>발주 요청일</th>
+                        <th>입고 요청일</th>
+                        <th>생산기지</th>
+                        <th>입고처</th>
+                        <th>요청 사유</th>
+                        <th>요청자</th>
+                        <th>거래처</th>
+                        <th>비고</th>
+                        <th>상태</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody id="confirmed-tbody">
+                    <tr id="confirmed-empty">
+                        <td colspan="15" style="text-align:center;color:#a0a4b8;padding:24px;">확인 완료된 건이 없습니다. 확인 버튼을 누르면 여기로 이동합니다.</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        </div>
+        </div>
+"""
+
+        # ── 등록 완료 그룹 (항상 표시) ──────────────────────────
+        html += f"""
+        <div class="group-card">
+        <div class="group-header" style="cursor:pointer;background:#f7f5ff;" onclick="toggleSection('reg-done-section','reg-toggle-icon')">
             <div class="group-color" style="background: #a78bfa;"></div>
             <span class="group-title" style="color: #a78bfa;">등록 완료</span>
             <span class="group-count">{len(reg_display)}건</span>
-            <span id="reg-toggle-icon" style="margin-left:auto;color:#a0a4b8;font-size:13px;">{"▶ 펼치기" if pending_orders else "▼ 접기"}</span>
+            <span id="reg-toggle-icon" style="margin-left:auto;color:#a0a4b8;font-size:13px;">▶</span>
         </div>
-        <div id="reg-done-section" style="display:{'none' if pending_orders else 'block'};">
+        <div id="reg-done-section" style="display:none;">
         <div class="table-wrapper">
             <table>
                 <thead>
@@ -744,9 +836,9 @@ async def index():
                 </thead>
                 <tbody>
 """
-            for r in reg_display:
-                po_no = r.get("po_no", "")
-                html += f"""
+        for r in reg_display:
+            po_no = r.get("po_no", "")
+            html += f"""
                     <tr style="opacity:0.75;">
                         <td style="font-size:12px;color:#6246ea;font-weight:600;">{po_no or '-'}</td>
                         <td class="item-code-cell">{r['품번']}</td>
@@ -759,38 +851,10 @@ async def index():
                         <td><button class="row-btn" style="background:#ffddd2;color:#c94a2a;font-size:12px;" onclick="cancelOrder('{r['id']}','{po_no}','{r['품번']}')">발주취소</button></td>
                     </tr>
 """
+        if not reg_display:
             html += """
-                </tbody>
-            </table>
-        </div>
-        </div>
-"""
-
-    # ── 작업 로그 (감사 기록) ──────────────────────────────
-    if audit_entries:
-        html += """
-        <div class="group-header" style="cursor:pointer;margin-top:8px;" onclick="toggleAuditLog()">
-            <div class="group-color" style="background: #f0b429;"></div>
-            <span class="group-title" style="color: #d69e1a;">작업 로그</span>
-            <span class="group-count">최근 """ + str(len(audit_entries)) + """건</span>
-            <span id="audit-toggle-icon" style="margin-left:auto;color:#a0a4b8;font-size:13px;">▶ 펼치기</span>
-        </div>
-        <div id="audit-log-section" style="display:none;">
-        <div class="table-wrapper">
-            <table>
-                <thead>
-                    <tr><th>시간</th><th>담당자</th><th>작업</th><th>내용</th></tr>
-                </thead>
-                <tbody>
-"""
-        for a in audit_entries:
-            action_color = {"삭제": "#c94a2a", "발주취소": "#c94a2a", "발주등록 요청": "#2e7d32"}.get(a["작업"], "#444")
-            html += f"""
-                    <tr style="font-size:12px;">
-                        <td style="color:#7a7f9a;white-space:nowrap;">{a['time']}</td>
-                        <td style="font-weight:600;">{a['담당자']}</td>
-                        <td style="color:{action_color};font-weight:600;white-space:nowrap;">{a['작업']}</td>
-                        <td>{a['내용']}</td>
+                    <tr>
+                        <td colspan="9" style="text-align:center;color:#a0a4b8;padding:24px;">등록 완료된 건이 없습니다.</td>
                     </tr>
 """
         html += """
@@ -798,6 +862,121 @@ async def index():
             </table>
         </div>
         </div>
+        </div>
+"""
+
+        # ── 삭제한 내역 그룹 (맨 아래, 항상 표시, 기본 접힘) ──────
+        html += f"""
+        <div class="group-card">
+        <div class="group-header" style="cursor:pointer;background:#fff5f3;" onclick="toggleSection('dismissed-section','dismissed-toggle-icon')">
+            <div class="group-color" style="background: #e85d4a;"></div>
+            <span class="group-title" style="color: #e85d4a;">삭제한 내역</span>
+            <span class="group-count">{len(dismissed_records)}건</span>
+            <span id="dismissed-toggle-icon" style="margin-left:auto;color:#a0a4b8;font-size:13px;">▶</span>
+        </div>
+        <div id="dismissed-section" style="display:none;">
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        <th>품번</th>
+                        <th>품명</th>
+                        <th>담당자</th>
+                        <th>삭제일시</th>
+                        <th>상태</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+"""
+        for r in reversed(dismissed_records):
+            mo = monday_map.get(r["id"], {})
+            html += f"""
+                    <tr style="opacity:0.7;">
+                        <td class="item-code-cell">{r.get('품번', '-')}</td>
+                        <td>{mo.get('품명', '-')}</td>
+                        <td>{r.get('담당자', '-')}</td>
+                        <td style="font-size:12px;color:#7a7f9a;">{r.get('dismissed_at', '-')}</td>
+                        <td><span class="status-pill" style="background:#ffddd2;color:#c94a2a;">삭제됨</span></td>
+                        <td><button class="row-btn" style="background:#d4f5e2;color:#1e7a48;font-size:12px;" onclick="restoreOrder('{r['id']}','{r.get('품번', '')}')">복구</button></td>
+                    </tr>
+"""
+        if not dismissed_records:
+            html += """
+                    <tr>
+                        <td colspan="6" style="text-align:center;color:#a0a4b8;padding:24px;">삭제한 내역이 없습니다.</td>
+                    </tr>
+"""
+        html += """
+                </tbody>
+            </table>
+        </div>
+        </div>
+        </div>
+"""
+
+    # ── 작업 로그 모달: 주 단위 접이식 그룹 (사이드바 아이콘으로 열기) ──
+    weeks: dict = {}
+    for a in audit_entries:
+        try:
+            d = datetime.strptime(a["time"][:10], "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        week_start = d - timedelta(days=d.weekday())  # 월요일 기준
+        weeks.setdefault(week_start, []).append(a)
+
+    this_week_start = date.today() - timedelta(days=date.today().weekday())
+    audit_body = ""
+    for i, week_start in enumerate(sorted(weeks.keys(), reverse=True)):
+        entries = weeks[week_start]
+        week_end = week_start + timedelta(days=6)
+        label = f"{week_start.month}월 {week_start.day}일 ~ {week_end.month}월 {week_end.day}일"
+        if week_start == this_week_start:
+            label += " (이번 주)"
+        expanded = (i == 0)
+        rows = ""
+        for a in entries:
+            action_color = {"삭제": "#c94a2a", "발주취소": "#c94a2a", "발주등록 요청": "#2e7d32"}.get(a["작업"], "#444")
+            rows += f"""
+                    <tr style="font-size:12px;">
+                        <td style="color:#7a7f9a;white-space:nowrap;">{a['time']}</td>
+                        <td style="font-weight:600;">{a['담당자']}</td>
+                        <td style="color:{action_color};font-weight:600;white-space:nowrap;">{a['작업']}</td>
+                        <td>{a['내용']}</td>
+                    </tr>
+"""
+        audit_body += f"""
+            <div style="padding:10px 16px;border-bottom:1px solid #f0f0f0;cursor:pointer;display:flex;align-items:center;background:#fafafa;"
+                 onclick="toggleAuditWeek({i})">
+                <span id="audit-week-icon-{i}" style="color:#a0a4b8;font-size:12px;margin-right:8px;">{'▼' if expanded else '▶'}</span>
+                <span style="font-weight:700;font-size:13px;color:#3b3f5c;">{label}</span>
+                <span style="margin-left:8px;font-size:13px;color:#7a7f9a;">{len(entries)}건</span>
+            </div>
+            <div id="audit-week-{i}" style="display:{'block' if expanded else 'none'};">
+            <table>
+                <thead>
+                    <tr><th>시간</th><th>담당자</th><th>작업</th><th>내용</th></tr>
+                </thead>
+                <tbody>{rows}</tbody>
+            </table>
+            </div>
+"""
+    if not audit_body:
+        audit_body = '<div style="text-align:center;color:#a0a4b8;padding:40px;">아직 작업 기록이 없습니다.</div>'
+
+    audit_modal = f"""
+<div id="audit-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:2000;" onclick="if(event.target===this)closeAuditModal()">
+    <div style="background:#fff;border-radius:12px;max-width:760px;margin:60px auto;max-height:75vh;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,0.25);">
+        <div style="display:flex;align-items:center;padding:18px 24px;border-bottom:1px solid #eee;">
+            <div class="group-color" style="background:#f0b429;margin-right:10px;"></div>
+            <span style="font-size:16px;font-weight:700;color:#d69e1a;">작업 로그</span>
+            <button onclick="closeAuditModal()" style="margin-left:auto;border:none;background:none;font-size:22px;cursor:pointer;color:#a0a4b8;">&times;</button>
+        </div>
+        <div style="overflow-y:auto;padding:0 8px 8px;">
+            {audit_body}
+        </div>
+    </div>
+</div>
 """
 
     html += f"""
@@ -815,6 +994,24 @@ async def index():
             <span class="s-label">등록 완료</span>
             <span class="s-value" style="color:#6246ea;" id="sum-registered">{len(reg_display)}</span>
         </div>
+        <div class="summary-item">
+            <span class="s-label">삭제 내역</span>
+            <span class="s-value" style="color:#e85d4a;" id="sum-dismissed">{len(dismissed_records)}</span>
+        </div>
+    </div>
+</div>
+
+{audit_modal}
+
+<div id="operator-gate" style="display:none;position:fixed;inset:0;background:rgba(20,22,35,0.65);z-index:3000;">
+    <div style="background:#fff;border-radius:14px;max-width:400px;margin:140px auto;padding:32px;text-align:center;box-shadow:0 16px 48px rgba(0,0,0,0.35);">
+        <div style="font-size:38px;margin-bottom:12px;">&#9997;&#65039;</div>
+        <h2 style="font-size:18px;color:#3b3f5c;margin-bottom:8px;">담당자명을 먼저 입력해주세요</h2>
+        <p style="font-size:13px;color:#7a7f9a;margin-bottom:20px;">누가 작업했는지 기록하기 위해 필요해요.<br>입력한 이름은 우측 상단에 표시됩니다.</p>
+        <input class="cell-input" type="text" id="gate-operator-input" placeholder="이름 입력 (예: 남소민)"
+               style="width:100%;font-size:15px;padding:10px 14px;text-align:center;font-weight:600;"
+               onkeydown="if(event.key==='Enter')submitOperatorGate()">
+        <button class="tool-btn primary" style="width:100%;margin-top:14px;padding:10px;font-size:14px;" onclick="submitOperatorGate()">시작하기</button>
     </div>
 </div>
 
@@ -874,19 +1071,57 @@ async def index():
         }});
     }});
 
-    // 담당자명: localStorage에 기억, 작업 시 필수
+    // 담당자명: 같은 탭에서는 새로고침해도 유지, 탭 닫고 재접속하거나 날짜가 바뀌면 다시 입력
     document.addEventListener('DOMContentLoaded', () => {{
-        const saved = localStorage.getItem('operatorName') || '';
-        const input = document.getElementById('operator-name');
-        input.value = saved;
-        updateAvatar(saved);
+        localStorage.removeItem('operatorName');  // 과거 방식 잔재 제거
+        const today = new Date().toISOString().slice(0, 10);
+        const saved = (sessionStorage.getItem('operatorName') || '').trim();
+        const savedDate = sessionStorage.getItem('operatorDate') || '';
+        if (saved && savedDate === today) {{
+            // 오늘 이미 입력함 (같은 탭) — 팝업 생략
+            document.getElementById('operator-name').value = saved;
+            updateAvatar(saved);
+            return;
+        }}
+        sessionStorage.removeItem('operatorName');
+        sessionStorage.removeItem('operatorDate');
+        document.getElementById('operator-name').value = '';
+        updateAvatar('');
+        document.getElementById('gate-operator-input').value = '';
+        document.getElementById('operator-gate').style.display = 'block';
+        setTimeout(() => document.getElementById('gate-operator-input').focus(), 100);
     }});
+
+    function submitOperatorGate() {{
+        const name = document.getElementById('gate-operator-input').value.trim();
+        if (!name) {{
+            showToast('이름을 입력해주세요!', true);
+            document.getElementById('gate-operator-input').focus();
+            return;
+        }}
+        sessionStorage.setItem('operatorName', name);
+        sessionStorage.setItem('operatorDate', new Date().toISOString().slice(0, 10));
+        document.getElementById('operator-name').value = name;
+        updateAvatar(name);
+        document.getElementById('operator-gate').style.display = 'none';
+        showToast('환영합니다, ' + name + '님!');
+    }}
 
     function saveOperator() {{
         const name = document.getElementById('operator-name').value.trim();
-        localStorage.setItem('operatorName', name);
         updateAvatar(name);
-        if (name) showToast('담당자: ' + name);
+        if (name) {{
+            sessionStorage.setItem('operatorName', name);
+            sessionStorage.setItem('operatorDate', new Date().toISOString().slice(0, 10));
+            showToast('담당자: ' + name);
+        }} else {{
+            // 이름을 지우면 다시 차단 팝업
+            sessionStorage.removeItem('operatorName');
+            sessionStorage.removeItem('operatorDate');
+            document.getElementById('operator-gate').style.display = 'block';
+            document.getElementById('gate-operator-input').value = '';
+            setTimeout(() => document.getElementById('gate-operator-input').focus(), 100);
+        }}
     }}
 
     function updateAvatar(name) {{
@@ -917,6 +1152,15 @@ async def index():
         document.getElementById('confirmed-count').textContent = confirmed;
         document.getElementById('sum-pending').textContent = pending;
         document.getElementById('sum-confirmed').textContent = confirmed;
+        // 그룹 헤더 건수 + 빈 안내 행 표시 갱신
+        const pgc = document.getElementById('pending-group-count');
+        if (pgc) pgc.textContent = pending + '건';
+        const cgc = document.getElementById('confirmed-group-count');
+        if (cgc) cgc.textContent = confirmed + '건';
+        const pe = document.getElementById('pending-empty');
+        if (pe) pe.style.display = pending === 0 ? 'table-row' : 'none';
+        const ce = document.getElementById('confirmed-empty');
+        if (ce) ce.style.display = confirmed === 0 ? 'table-row' : 'none';
     }}
 
     function confirmOrder(id) {{
@@ -943,6 +1187,9 @@ async def index():
         btn.style.cursor = 'default';
         vendor.disabled = true;
 
+        // 확인 완료 그룹으로 행 이동
+        document.getElementById('confirmed-tbody').appendChild(row);
+
         updateCounts();
         showToast('확인 완료: ' + row.dataset.itemCd + ' / ' + row.dataset.vendor);
     }}
@@ -963,6 +1210,7 @@ async def index():
             row.remove();
             updateCounts();
             showToast('삭제 완료 — 발주가 진행되지 않습니다.');
+            setTimeout(() => location.reload(), 1200);
         }} catch (e) {{
             showToast('삭제 실패: ' + e.message, true);
         }}
@@ -1053,30 +1301,49 @@ async def index():
     }}
 
     // 등록완료 그룹 접기/펼치기
-    function toggleAuditLog() {{
-        const sec = document.getElementById('audit-log-section');
-        const icon = document.getElementById('audit-toggle-icon');
-        if (!sec) return;
-        if (sec.style.display === 'none') {{
-            sec.style.display = 'block';
-            if (icon) icon.textContent = '▼ 접기';
-        }} else {{
-            sec.style.display = 'none';
-            if (icon) icon.textContent = '▶ 펼치기';
+    function openAuditModal() {{
+        document.getElementById('audit-modal').style.display = 'block';
+    }}
+
+    function closeAuditModal() {{
+        document.getElementById('audit-modal').style.display = 'none';
+    }}
+
+    async function restoreOrder(id, itemCd) {{
+        const operator = getOperator();
+        if (!operator) return;
+        if (!confirm('품번 ' + itemCd + ' 발주 요청을 복구할까요?\\n확인 요청 목록으로 돌아갑니다.')) return;
+        try {{
+            const resp = await fetch('/api/restore-order', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{id: id, 품번: itemCd, 담당자: operator}}),
+            }});
+            const data = await resp.json();
+            if (!data.ok) throw new Error(data.error || '실패');
+            showToast('복구 완료 — 확인 요청 목록으로 돌아갑니다.');
+            setTimeout(() => location.reload(), 1200);
+        }} catch (e) {{
+            showToast('복구 실패: ' + e.message, true);
         }}
     }}
 
-    function toggleRegDone() {{
-        const sec = document.getElementById('reg-done-section');
-        const icon = document.getElementById('reg-toggle-icon');
+    function toggleSection(sectionId, iconId) {{
+        const sec = document.getElementById(sectionId);
+        const icon = document.getElementById(iconId);
         if (!sec) return;
-        if (sec.style.display === 'none') {{
-            sec.style.display = 'block';
-            if (icon) icon.textContent = '▼ 접기';
-        }} else {{
-            sec.style.display = 'none';
-            if (icon) icon.textContent = '▶ 펼치기';
-        }}
+        const open = sec.style.display !== 'none';
+        sec.style.display = open ? 'none' : 'block';
+        if (icon) icon.textContent = open ? '▶' : '▼';
+    }}
+
+    function toggleAuditWeek(i) {{
+        const sec = document.getElementById('audit-week-' + i);
+        const icon = document.getElementById('audit-week-icon-' + i);
+        if (!sec) return;
+        const open = sec.style.display !== 'none';
+        sec.style.display = open ? 'none' : 'block';
+        if (icon) icon.textContent = open ? '▶' : '▼';
     }}
 
     // 알람음 (짧은 비프)
