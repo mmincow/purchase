@@ -8,6 +8,7 @@ click_coords.txt
 last_register_result.json
 registered_orders.json
 dismissed_orders.json
+audit_log.json
 
 # 스크린샷/디버그 이미지
 debug_*.png

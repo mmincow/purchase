@@ -83,6 +83,7 @@ BOARD_ID = "5025883713"
 BASE_DIR = Path(__file__).parent
 REGISTERED_FILE = BASE_DIR / "registered_orders.json"
 DISMISSED_FILE = BASE_DIR / "dismissed_orders.json"
+AUDIT_FILE = BASE_DIR / "audit_log.json"
 
 # 납품장소 매핑 (입고처 코드 → 납품장소 전체 텍스트)
 _납품장소_map: dict = {}
@@ -116,6 +117,7 @@ def save_registered_orders(new_orders: list):
                 "요청수량": str(o.get("요청수량", "")),
                 "입고요청일": o.get("입고요청일", ""),
                 "거래처": o.get("거래처", o.get("거래처명", "")),
+                "담당자": o.get("담당자", ""),
                 "registered_at": now,
             })
     with open(REGISTERED_FILE, "w", encoding="utf-8") as f:
@@ -127,6 +129,30 @@ def load_dismissed_ids() -> set:
         return set()
     with open(DISMISSED_FILE, encoding="utf-8") as f:
         return {str(r["id"]) for r in json.load(f)}
+
+
+def append_audit(action: str, operator: str, detail: str):
+    """작업 감사 로그: 누가(담당자) 언제 무엇을 했는지 기록."""
+    records = []
+    if AUDIT_FILE.exists():
+        with open(AUDIT_FILE, encoding="utf-8") as f:
+            records = json.load(f)
+    records.append({
+        "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "담당자": operator.strip() or "미입력",
+        "작업": action,
+        "내용": detail,
+    })
+    with open(AUDIT_FILE, "w", encoding="utf-8") as f:
+        json.dump(records, f, ensure_ascii=False, indent=2)
+
+
+def load_audit_log(limit: int = 30) -> list:
+    if not AUDIT_FILE.exists():
+        return []
+    with open(AUDIT_FILE, encoding="utf-8") as f:
+        records = json.load(f)
+    return list(reversed(records[-limit:]))
 
 
 def load_vendor_map():
@@ -248,6 +274,8 @@ async def api_cancel_order(request: dict):
     """발주 취소: 웹앱 등록완료 목록에서 제거 + 아마란스 자동 삭제."""
     order_id = str(request.get("id", ""))
     po_no = request.get("po_no", "")
+    operator = str(request.get("담당자", ""))
+    append_audit("발주취소", operator, f"등록된 발주 취소 — {po_no or '발주번호 없음'}")
 
     # registered_orders.json에서 제거
     existing = load_registered_orders()
@@ -267,6 +295,7 @@ async def api_cancel_order(request: dict):
 async def api_dismiss_order(request: dict):
     """발주 불필요 삭제: 대기 목록에서 영구 제외 — 아마란스 등록이 진행되지 않음."""
     order_id = str(request.get("id", ""))
+    operator = str(request.get("담당자", ""))
     if not order_id:
         return JSONResponse({"ok": False, "error": "id 없음"}, status_code=400)
 
@@ -278,10 +307,12 @@ async def api_dismiss_order(request: dict):
         records.append({
             "id": order_id,
             "품번": request.get("품번", ""),
+            "담당자": operator,
             "dismissed_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         })
         with open(DISMISSED_FILE, "w", encoding="utf-8") as f:
             json.dump(records, f, ensure_ascii=False, indent=2)
+    append_audit("삭제", operator, f"발주 요청 삭제 — 품번 {request.get('품번', '?')}")
     return JSONResponse({"ok": True})
 
 
@@ -309,8 +340,12 @@ async def api_test_notification():
 async def api_register(request: dict):
     """확인 완료된 발주 건을 아마란스에 등록"""
     orders = request.get("orders", [])
+    operator = str(request.get("담당자", ""))
     if not orders:
         return JSONResponse({"status": "error", "message": "등록할 항목이 없습니다"})
+
+    item_list = ", ".join(o.get("품번", "?") for o in orders)
+    append_audit("발주등록 요청", operator, f"{len(orders)}건 아마란스 등록 — {item_list}")
 
     vendor_map, _ = load_vendor_map()
 
@@ -346,7 +381,9 @@ async def api_register(request: dict):
             "납품장소": dlvplc,
         })
 
-    # 등록 완료 목록에 저장
+    # 등록 완료 목록에 저장 (담당자 포함)
+    for o in orders:
+        o["담당자"] = operator
     save_registered_orders(orders)
 
     # 백그라운드에서 RPA 실행
@@ -411,6 +448,7 @@ async def index():
 
     vendor_map, vendor_duplicates = load_vendor_map()
     item_vendors = build_item_vendors()
+    audit_entries = load_audit_log(30)
     today = date.today().strftime("%Y년 %m월 %d일")
 
     # 거래처 매핑 데이터를 JSON으로 준비
@@ -573,8 +611,11 @@ async def index():
         </div>
         <div class="user-info">
             <span>{today}</span>
-            <div class="avatar">남</div>
-            <span>남소민</span>
+            <div class="avatar" id="operator-avatar">?</div>
+            <input class="cell-input" type="text" id="operator-name"
+                   placeholder="담당자명 입력"
+                   style="width:110px;font-weight:600;"
+                   onchange="saveOperator()">
         </div>
     </div>
 
@@ -725,6 +766,40 @@ async def index():
         </div>
 """
 
+    # ── 작업 로그 (감사 기록) ──────────────────────────────
+    if audit_entries:
+        html += """
+        <div class="group-header" style="cursor:pointer;margin-top:8px;" onclick="toggleAuditLog()">
+            <div class="group-color" style="background: #f0b429;"></div>
+            <span class="group-title" style="color: #d69e1a;">작업 로그</span>
+            <span class="group-count">최근 """ + str(len(audit_entries)) + """건</span>
+            <span id="audit-toggle-icon" style="margin-left:auto;color:#a0a4b8;font-size:13px;">▶ 펼치기</span>
+        </div>
+        <div id="audit-log-section" style="display:none;">
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr><th>시간</th><th>담당자</th><th>작업</th><th>내용</th></tr>
+                </thead>
+                <tbody>
+"""
+        for a in audit_entries:
+            action_color = {"삭제": "#c94a2a", "발주취소": "#c94a2a", "발주등록 요청": "#2e7d32"}.get(a["작업"], "#444")
+            html += f"""
+                    <tr style="font-size:12px;">
+                        <td style="color:#7a7f9a;white-space:nowrap;">{a['time']}</td>
+                        <td style="font-weight:600;">{a['담당자']}</td>
+                        <td style="color:{action_color};font-weight:600;white-space:nowrap;">{a['작업']}</td>
+                        <td>{a['내용']}</td>
+                    </tr>
+"""
+        html += """
+                </tbody>
+            </table>
+        </div>
+        </div>
+"""
+
     html += f"""
     </div>
     <div class="summary-bar">
@@ -799,6 +874,35 @@ async def index():
         }});
     }});
 
+    // 담당자명: localStorage에 기억, 작업 시 필수
+    document.addEventListener('DOMContentLoaded', () => {{
+        const saved = localStorage.getItem('operatorName') || '';
+        const input = document.getElementById('operator-name');
+        input.value = saved;
+        updateAvatar(saved);
+    }});
+
+    function saveOperator() {{
+        const name = document.getElementById('operator-name').value.trim();
+        localStorage.setItem('operatorName', name);
+        updateAvatar(name);
+        if (name) showToast('담당자: ' + name);
+    }}
+
+    function updateAvatar(name) {{
+        document.getElementById('operator-avatar').textContent = name ? name.charAt(0) : '?';
+    }}
+
+    function getOperator() {{
+        const name = document.getElementById('operator-name').value.trim();
+        if (!name) {{
+            showToast('먼저 우측 상단에 담당자명을 입력해주세요!', true);
+            document.getElementById('operator-name').focus();
+            return null;
+        }}
+        return name;
+    }}
+
     function showToast(msg, isError) {{
         const t = document.getElementById('toast');
         t.textContent = msg;
@@ -844,13 +948,15 @@ async def index():
     }}
 
     async function dismissOrder(id) {{
+        const operator = getOperator();
+        if (!operator) return;
         const row = document.getElementById('row-' + id);
-        if (!confirm('이 발주 요청을 삭제할까요?\\n품번: ' + row.dataset.itemCd + '\\n(삭제하면 아마란스 발주 등록이 진행되지 않습니다)')) return;
+        if (!confirm('이 발주 요청을 삭제할까요?\\n품번: ' + row.dataset.itemCd + '\\n담당자: ' + operator + '\\n(삭제하면 아마란스 발주 등록이 진행되지 않습니다)')) return;
         try {{
             const resp = await fetch('/api/dismiss-order', {{
                 method: 'POST',
                 headers: {{'Content-Type': 'application/json'}},
-                body: JSON.stringify({{id: id, 품번: row.dataset.itemCd}}),
+                body: JSON.stringify({{id: id, 품번: row.dataset.itemCd, 담당자: operator}}),
             }});
             const data = await resp.json();
             if (!data.ok) throw new Error(data.error || '실패');
@@ -863,6 +969,8 @@ async def index():
     }}
 
     async function registerAll() {{
+        const operator = getOperator();
+        if (!operator) return;
         const confirmed = document.querySelectorAll('.pill-confirmed');
         if (confirmed.length === 0) {{
             showToast('먼저 항목을 확인해주세요.', true);
@@ -889,7 +997,7 @@ async def index():
             const resp = await fetch('/api/register', {{
                 method: 'POST',
                 headers: {{'Content-Type': 'application/json'}},
-                body: JSON.stringify({{orders}}),
+                body: JSON.stringify({{orders, 담당자: operator}}),
             }});
             const data = await resp.json();
             showToast(data.message + ' — 잠시 후 새로고침됩니다.');
@@ -907,6 +1015,8 @@ async def index():
 
     // 발주 취소 (등록완료 그룹에서 제거 + 아마란스 삭제)
     async function cancelOrder(id, poNo, itemCd) {{
+        const operator = getOperator();
+        if (!operator) return;
         const msg = poNo
             ? itemCd + ' (' + poNo + ') 발주를 취소하시겠습니까?\\n아마란스에서도 자동 삭제됩니다.'
             : itemCd + ' 발주를 취소하시겠습니까?\\n(발주번호 미저장 — 아마란스에서 수동 삭제 필요)';
@@ -914,7 +1024,7 @@ async def index():
         const resp = await fetch('/api/cancel-order', {{
             method: 'POST',
             headers: {{'Content-Type': 'application/json'}},
-            body: JSON.stringify({{id, po_no: poNo}}),
+            body: JSON.stringify({{id, po_no: poNo, 담당자: operator}}),
         }});
         const data = await resp.json();
         if (data.ok) {{
@@ -943,6 +1053,19 @@ async def index():
     }}
 
     // 등록완료 그룹 접기/펼치기
+    function toggleAuditLog() {{
+        const sec = document.getElementById('audit-log-section');
+        const icon = document.getElementById('audit-toggle-icon');
+        if (!sec) return;
+        if (sec.style.display === 'none') {{
+            sec.style.display = 'block';
+            if (icon) icon.textContent = '▼ 접기';
+        }} else {{
+            sec.style.display = 'none';
+            if (icon) icon.textContent = '▶ 펼치기';
+        }}
+    }}
+
     function toggleRegDone() {{
         const sec = document.getElementById('reg-done-section');
         const icon = document.getElementById('reg-toggle-icon');
