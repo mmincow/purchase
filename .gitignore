@@ -7,6 +7,7 @@ click_coords.txt
 *.log
 last_register_result.json
 registered_orders.json
+dismissed_orders.json
 
 # 스크린샷/디버그 이미지
 debug_*.png

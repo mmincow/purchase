@@ -82,6 +82,7 @@ MONDAY_API_URL = "https://api.monday.com/v2"
 BOARD_ID = "5025883713"
 BASE_DIR = Path(__file__).parent
 REGISTERED_FILE = BASE_DIR / "registered_orders.json"
+DISMISSED_FILE = BASE_DIR / "dismissed_orders.json"
 
 # 납품장소 매핑 (입고처 코드 → 납품장소 전체 텍스트)
 _납품장소_map: dict = {}
@@ -119,6 +120,13 @@ def save_registered_orders(new_orders: list):
             })
     with open(REGISTERED_FILE, "w", encoding="utf-8") as f:
         json.dump(existing, f, ensure_ascii=False, indent=2)
+
+
+def load_dismissed_ids() -> set:
+    if not DISMISSED_FILE.exists():
+        return set()
+    with open(DISMISSED_FILE, encoding="utf-8") as f:
+        return {str(r["id"]) for r in json.load(f)}
 
 
 def load_vendor_map():
@@ -255,6 +263,28 @@ async def api_cancel_order(request: dict):
     return JSONResponse({"ok": True, "po_no": po_no})
 
 
+@app.post("/api/dismiss-order")
+async def api_dismiss_order(request: dict):
+    """발주 불필요 삭제: 대기 목록에서 영구 제외 — 아마란스 등록이 진행되지 않음."""
+    order_id = str(request.get("id", ""))
+    if not order_id:
+        return JSONResponse({"ok": False, "error": "id 없음"}, status_code=400)
+
+    records = []
+    if DISMISSED_FILE.exists():
+        with open(DISMISSED_FILE, encoding="utf-8") as f:
+            records = json.load(f)
+    if order_id not in {str(r["id"]) for r in records}:
+        records.append({
+            "id": order_id,
+            "품번": request.get("품번", ""),
+            "dismissed_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        })
+        with open(DISMISSED_FILE, "w", encoding="utf-8") as f:
+            json.dump(records, f, ensure_ascii=False, indent=2)
+    return JSONResponse({"ok": True})
+
+
 @app.post("/api/mark-registered")
 async def api_mark_registered(request: dict):
     """수동으로 등록 완료 처리."""
@@ -368,7 +398,11 @@ async def index():
     # 등록완료 분리
     registered_data = load_registered_orders()
     registered_ids = {r["id"] for r in registered_data}
-    pending_orders = [o for o in orders if str(o["id"]) not in registered_ids]
+    dismissed_ids = load_dismissed_ids()
+    pending_orders = [
+        o for o in orders
+        if str(o["id"]) not in registered_ids and str(o["id"]) not in dismissed_ids
+    ]
     monday_map = {o["id"]: o for o in orders}
     reg_display = []
     for r in reversed(registered_data):
@@ -492,6 +526,8 @@ async def index():
         .row-btn {{ padding: 5px 14px; border: none; border-radius: 6px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.2s; font-family: inherit; }}
         .row-btn-confirm {{ background: #6a9bff; color: white; }}
         .row-btn-confirm:hover {{ background: #5588f0; }}
+        .row-btn-delete {{ background: #ffddd2; color: #c94a2a; margin-left: 4px; }}
+        .row-btn-delete:hover {{ background: #ffc9b8; }}
         .summary-bar {{ background: #ffffff; border-top: 1px solid #e8eaf0; padding: 12px 28px; display: flex; gap: 32px; position: sticky; bottom: 0; box-shadow: 0 -1px 4px rgba(0,0,0,0.04); }}
         .summary-item {{ display: flex; align-items: center; gap: 8px; }}
         .summary-item .s-label {{ font-size: 12px; color: #a0a4b8; }}
@@ -626,7 +662,7 @@ async def index():
                         <td><input class="cell-input" type="text" id="note-{order['id']}" placeholder="비고 입력"></td>
                         <td><span class="status-pill pill-pending" id="status-{order['id']}">대기</span></td>
                         <td>
-                            <button class="row-btn row-btn-confirm" id="btn-{order['id']}" onclick="confirmOrder('{order['id']}')">확인</button>
+                            <button class="row-btn row-btn-confirm" id="btn-{order['id']}" onclick="confirmOrder('{order['id']}')">확인</button><button class="row-btn row-btn-delete" onclick="dismissOrder('{order['id']}')">삭제</button>
                         </td>
                     </tr>
 """
@@ -805,6 +841,25 @@ async def index():
 
         updateCounts();
         showToast('확인 완료: ' + row.dataset.itemCd + ' / ' + row.dataset.vendor);
+    }}
+
+    async function dismissOrder(id) {{
+        const row = document.getElementById('row-' + id);
+        if (!confirm('이 발주 요청을 삭제할까요?\\n품번: ' + row.dataset.itemCd + '\\n(삭제하면 아마란스 발주 등록이 진행되지 않습니다)')) return;
+        try {{
+            const resp = await fetch('/api/dismiss-order', {{
+                method: 'POST',
+                headers: {{'Content-Type': 'application/json'}},
+                body: JSON.stringify({{id: id, 품번: row.dataset.itemCd}}),
+            }});
+            const data = await resp.json();
+            if (!data.ok) throw new Error(data.error || '실패');
+            row.remove();
+            updateCounts();
+            showToast('삭제 완료 — 발주가 진행되지 않습니다.');
+        }} catch (e) {{
+            showToast('삭제 실패: ' + e.message, true);
+        }}
     }}
 
     async function registerAll() {{
