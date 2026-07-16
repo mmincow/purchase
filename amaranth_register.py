@@ -305,6 +305,73 @@ def fill_납품장소(page, text: str):
         _dbg(f"  [납품장소 오류] {e}")
 
 
+def click_결재상신(page):
+    """하단 버튼줄의 결재상신 클릭 (상단 툴바에도 같은 버튼이 있으므로 y좌표 최대인 것 선택)"""
+    _dbg("[결재상신 클릭 시작]")
+    best = None  # (y, element, box)
+    for frame in page.frames:
+        if 'onechamber' in (frame.url or '').lower():
+            continue
+        try:
+            for el in frame.locator('button:has-text("결재상신"), a:has-text("결재상신")').all():
+                box = el.bounding_box()
+                if box and box['width'] > 0:
+                    if best is None or box['y'] > best[0]:
+                        best = (box['y'], el, box)
+        except Exception:
+            pass
+    if best is None:
+        _dbg("  [결재상신 버튼 못 찾음]")
+        return False
+    _, el, box = best
+    el.click(force=True)
+    _dbg(f"  [결재상신 클릭 완료] box={box}")
+    page.wait_for_timeout(2000)
+
+    # 물류문서 선택창: "발주서" 정확히 선택 (※ "발주서(외화)" 절대 클릭 금지!)
+    picked = False
+    for frame in page.frames:
+        if 'onechamber' in (frame.url or '').lower():
+            continue
+        try:
+            for el in frame.get_by_text("발주서", exact=True).all():
+                b = el.bounding_box()
+                if b and b['width'] > 0:
+                    el.click(force=True)
+                    _dbg(f"  [물류문서: 발주서 선택] box={b}")
+                    picked = True
+                    break
+        except Exception:
+            pass
+        if picked:
+            break
+    if not picked:
+        _dbg("  [물류문서: 발주서 항목 못 찾음 — 기본 선택 상태로 진행]")
+    page.wait_for_timeout(500)
+
+    # 확인 버튼 클릭
+    confirmed = False
+    for frame in page.frames:
+        if 'onechamber' in (frame.url or '').lower():
+            continue
+        try:
+            for el in frame.locator('button:has-text("확인")').all():
+                b = el.bounding_box()
+                if b and b['width'] > 0:
+                    el.click(force=True)
+                    _dbg(f"  [물류문서 확인 클릭] box={b}")
+                    confirmed = True
+                    break
+        except Exception:
+            pass
+        if confirmed:
+            break
+    page.wait_for_timeout(3000)
+    page.screenshot(path="C:/Users/somin/OneDrive/Desktop/자동화/purchase/debug_결재상신.png")
+    _dbg("  [물류문서 확인 후 화면 캡처 완료 — 다음 단계 학습 대기]")
+    return True
+
+
 def register_order(page, order):
     """
     발주 1건 등록
@@ -592,6 +659,9 @@ def register_order(page, order):
     납품장소 = order.get("납품장소", "")
     _dbg(f"  [납품장소 값] {납품장소!r}")
     fill_납품장소(page, 납품장소)
+
+    # 부가정보 완료 후 하단 결재상신 클릭
+    click_결재상신(page)
 
     return {"status": 200, "body": f"{item_cd} 입력 완료", "poNo": po_no}
 
